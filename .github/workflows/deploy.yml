@@ -1,0 +1,77 @@
+name: ci-deploy
+
+# Every push to main: test, then build and push the image to GHCR, then (only once
+# the box exists) pull and restart it there.
+#
+# The image job needs nothing beyond the built-in GITHUB_TOKEN (packages: write).
+# quant-core is vendored in the repo, so no other repo is read.
+#
+# The deploy job is skipped until the repo variable DEPLOY_HOST is set, so CI stays
+# green before the crypto box is rebuilt. One-time setup (Settings → Secrets and
+# variables → Actions):
+#   Secret    DEPLOY_SSH_KEY  private key for DEPLOY_USER on the box
+#   Variables DEPLOY_HOST     the box's IP
+#             DEPLOY_USER     SSH user (default: stratai)
+# and on the box, once: see README.md "One-time box setup".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/6829nkhpas/quant_radar
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: image
+    if: vars.DEPLOY_HOST != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ vars.DEPLOY_HOST }}
+          username: ${{ vars.DEPLOY_USER || 'stratai' }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/stratai/quant-radar
+            docker compose pull
+            docker compose up -d
+            docker image prune -f

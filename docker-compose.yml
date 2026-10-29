@@ -1,0 +1,40 @@
+# Quant_Radar on the crypto-app box, as its own compose project.
+#
+# It joins crypto-app's docker network (`stratai_stratai`: project `stratai`,
+# network `stratai`) so that stack's Caddy can reach it as `quant-radar:8090` and
+# serve it at wss://crypto-api.stratai.live/ws/radar. No port is published: the
+# gateway is the only way in. That network must exist first (crypto-app's
+# `docker compose up` creates it; for a local test, `docker network create
+# stratai_stratai`).
+#
+# No healthcheck: the distroless image has no shell or curl to run one. Probe
+# `http://quant-radar:8090/health` from another container on the network instead
+# (it answers 503 when the board is more than 180 s old).
+
+name: quant-radar
+
+services:
+  quant-radar:
+    image: ghcr.io/6829nkhpas/quant_radar:${TAG:-latest}
+    container_name: quant-radar
+    env_file:
+      - path: .env
+        required: false
+    restart: unless-stopped
+    # Measured locally: ~25 MB resident and ~13 s of light work per minute.
+    mem_limit: 128m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - stratai
+    # Local testing only — never publish it on the box:
+    # ports: ["127.0.0.1:8090:8090"]
+
+networks:
+  stratai:
+    external: true
+    name: stratai_stratai
