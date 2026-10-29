@@ -1,0 +1,31 @@
+[package]
+name = "quant_radar"
+version = "0.1.0"
+edition = "2024"
+description = "Ranks the strongest bullish and bearish Binance USDⓈ-M perps every minute and pushes the board to every client over one WebSocket."
+publish = false
+
+[dependencies]
+axum = { version = "0.8.9", features = ["ws"] }
+# No default features: the regex filter and terminal colours are dead weight in a
+# container log; module-level `RUST_LOG` filtering still works without them.
+env_logger = { version = "0.11.11", default-features = false, features = ["humantime"] }
+futures-util = "0.3.34"
+log = "0.4.34"
+# A verbatim copy of crypto-app's quant-core (source commit in README.md), so this
+# repo builds with no access to that private repo.
+quant-core = { path = "quant-core" }
+# 0.12, not 0.13: 0.12's `rustls-tls` uses the ring provider, the same one
+# tokio-tungstenite's rustls build uses. 0.13's `rustls` defaults to aws-lc-rs,
+# which brings a C/CMake build for no gain here.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+# 0.29 = the version axum 0.8's `ws` feature already pulls in, so one tungstenite
+# is compiled, not two.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+
+[profile.release]
+strip = true
+lto = "thin"

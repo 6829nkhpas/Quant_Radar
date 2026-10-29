@@ -1,0 +1,77 @@
+{
+    "symbols":  [
+                    {
+                        "symbol":  "BTCUSDT",
+                        "pair":  "BTCUSDT",
+                        "contractType":  "PERPETUAL",
+                        "status":  "TRADING",
+                        "baseAsset":  "BTC",
+                        "quoteAsset":  "USDT"
+                    },
+                    {
+                        "symbol":  "ETHUSDT",
+                        "pair":  "ETHUSDT",
+                        "contractType":  "PERPETUAL",
+                        "status":  "TRADING",
+                        "baseAsset":  "ETH",
+                        "quoteAsset":  "USDT"
+                    },
+                    {
+                        "symbol":  "XRPUSDT",
+                        "pair":  "XRPUSDT",
+                        "contractType":  "PERPETUAL",
+                        "status":  "TRADING",
+                        "baseAsset":  "XRP",
+                        "quoteAsset":  "USDT"
+                    },
+                    {
+                        "symbol":  "OMGUSDT",
+                        "pair":  "OMGUSDT",
+                        "contractType":  "PERPETUAL",
+                        "status":  "SETTLING",
+                        "baseAsset":  "OMG",
+                        "quoteAsset":  "USDT"
+                    },
+                    {
+                        "symbol":  "SOLUSDT",
+                        "pair":  "SOLUSDT",
+                        "contractType":  "PERPETUAL",
+                        "status":  "TRADING",
+                        "baseAsset":  "SOL",
+                        "quoteAsset":  "USDT"
+                    },
+                    {
+                        "symbol":  "USDCUSDT",
+                        "pair":  "USDCUSDT",
+                        "contractType":  "PERPETUAL",
+                        "status":  "TRADING",
+                        "baseAsset":  "USDC",
+                        "quoteAsset":  "USDT"
+                    },
+                    {
+                        "symbol":  "BTCUSDC",
+                        "pair":  "BTCUSDC",
+                        "contractType":  "PERPETUAL",
+                        "status":  "TRADING",
+                        "baseAsset":  "BTC",
+                        "quoteAsset":  "USDC"
+                    },
+                    {
+                        "symbol":  "XAUUSDT",
+                        "pair":  "XAUUSDT",
+                        "contractType":  "TRADIFI_PERPETUAL",
+                        "status":  "TRADING",
+                        "baseAsset":  "XAU",
+                        "quoteAsset":  "USDT"
+                    },
+                    {
+                        "symbol":  "BTCUSDT_261225",
+                        "pair":  "BTCUSDT",
+                        "contractType":  "CURRENT_QUARTER",
+                        "status":  "TRADING",
+                        "baseAsset":  "BTC",
+                        "quoteAsset":  "USDT"
+                    }
+                ],
+    "timezone":  "UTC"
+}

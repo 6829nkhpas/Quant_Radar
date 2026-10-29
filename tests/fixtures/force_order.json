@@ -1,0 +1,7 @@
+[
+  {"e":"forceOrder","E":1793304741133,"o":{"s":"HYPEUSDT","S":"BUY","o":"LIMIT","f":"IOC","q":"30.00","p":"94.75600","ap":"93.81600","X":"FILLED","l":"6.37","z":"30.00","T":1793304740130,"ps":"HYPEUSDT","st":1}},
+  {"e":"forceOrder","E":1793304742170,"o":{"s":"IDOLUSDT","S":"SELL","o":"LIMIT","f":"IOC","q":"184999","p":"0.0136800","ap":"0.0135749","X":"FILLED","l":"9355","z":"184999","T":1793304741160,"ps":"IDOLUSDT","st":1}},
+  {"e":"forceOrder","E":1793304745117,"o":{"s":"PARTIUSDT","S":"SELL","o":"LIMIT","f":"IOC","q":"2630","p":"0.0587400","ap":"0","X":"NEW","l":"0","z":"0","T":1793304744111,"ps":"PARTIUSDT","st":1}},
+  {"e":"forceOrder","E":1793304746000,"o":{"s":"BTCUSD_PERP","S":"SELL","o":"LIMIT","f":"IOC","q":"10","p":"80000.0","ap":"80010.0","X":"FILLED","l":"10","z":"10","T":1793304745900,"ps":"BTCUSD","st":2}},
+  {"e":"aggTrade","E":1793304746000,"s":"BTCUSDT"}
+]

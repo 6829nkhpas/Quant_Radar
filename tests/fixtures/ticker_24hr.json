@@ -1,0 +1,50 @@
+[
+    {
+        "symbol":  "XAUUSDT",
+        "priceChangePercent":  "-1.153",
+        "lastPrice":  "4029.03",
+        "quoteVolume":  "1929227130.00"
+    },
+    {
+        "symbol":  "XRPUSDT",
+        "priceChangePercent":  "-3.857",
+        "lastPrice":  "1.2836",
+        "quoteVolume":  "663485551.0411"
+    },
+    {
+        "symbol":  "BTCUSDT_261225",
+        "priceChangePercent":  "-0.866",
+        "lastPrice":  "81539.0",
+        "quoteVolume":  "9904046.4"
+    },
+    {
+        "symbol":  "ETHUSDT",
+        "priceChangePercent":  "-1.410",
+        "lastPrice":  "2336.16",
+        "quoteVolume":  "9065401155.92"
+    },
+    {
+        "symbol":  "BTCUSDC",
+        "priceChangePercent":  "-0.858",
+        "lastPrice":  "80778.4",
+        "quoteVolume":  "2875353860.0"
+    },
+    {
+        "symbol":  "SOLUSDT",
+        "priceChangePercent":  "-2.867",
+        "lastPrice":  "99.9300",
+        "quoteVolume":  "1648409929.2539"
+    },
+    {
+        "symbol":  "BTCUSDT",
+        "priceChangePercent":  "-0.789",
+        "lastPrice":  "80848.40",
+        "quoteVolume":  "13634797095.31"
+    },
+    {
+        "symbol":  "USDCUSDT",
+        "priceChangePercent":  "0.028",
+        "lastPrice":  "1.0003920",
+        "quoteVolume":  "2588204.2513620"
+    }
+]
