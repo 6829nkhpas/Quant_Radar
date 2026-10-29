@@ -44,6 +44,10 @@ const UNIVERSE_EVERY: Duration = Duration::from_secs(60 * 60);
 /// Clients send nothing we read; anything bigger than this is refused.
 const MAX_CLIENT_MESSAGE: usize = 4096;
 const PING_EVERY: Duration = Duration::from_secs(30);
+/// A client that cannot take one ~7 KB frame in this long is dropped. Without it, a
+/// peer that vanished without a FIN (a phone losing signal) blocks its `send` until
+/// the kernel's TCP retransmit timeout (~15 min) and holds a `RADAR_MAX_CLIENTS` slot.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// Requests in flight per batch; the Binance client enforces its own cap as well.
 const BATCH: usize = 5;
 
@@ -143,8 +147,11 @@ struct Scanner {
 
 impl Scanner {
     /// Poll every symbol's 15m klines: a full 1000-bar backfill for a symbol with no
-    /// series, otherwise just enough bars to reach back to the last one held (3 in
-    /// steady state: the forming bar and two closed ones, weight 1).
+    /// series OR fewer than `MIN_BARS` (a short series is never scored, and topping it
+    /// up 3 bars a minute would take ~75 h to qualify — after a missed-poll gap made
+    /// `merge_bars` replace it, for instance), otherwise just enough bars to reach back
+    /// to the last one held (3 in steady state: the forming bar and two closed ones,
+    /// weight 1).
     async fn poll_klines(&mut self, bn: &Binance) {
         let now = now_ms();
         let current = now - now.rem_euclid(score::BAR_MS);
@@ -152,7 +159,11 @@ impl Scanner {
             .symbols
             .iter()
             .map(|s| {
-                let limit = self.series.get(s).and_then(|v| v.last()).map_or(score::KEEP_BARS, |last| {
+                // ponytail: a listing younger than ~3 days has under MIN_BARS of history
+                // at all, so it re-requests 1000 bars (weight 5, not 1) every pass until
+                // it qualifies; fine for the handful in the top 150.
+                let held = self.series.get(s).filter(|v| v.len() > score::MIN_BARS);
+                let limit = held.and_then(|v| v.last()).map_or(score::KEEP_BARS, |last| {
                     (((current - last.t) / score::BAR_MS) as usize + 1).clamp(3, score::KEEP_BARS)
                 });
                 (s.clone(), limit)
@@ -365,6 +376,11 @@ impl Drop for ClientSlot<'_> {
     }
 }
 
+/// Send one message, failing on an error OR on `SEND_TIMEOUT`.
+async fn send(socket: &mut WebSocket, m: Message) -> bool {
+    matches!(tokio::time::timeout(SEND_TIMEOUT, socket.send(m)).await, Ok(Ok(())))
+}
+
 async fn client(mut socket: WebSocket, s: Arc<Shared>) {
     s.clients.fetch_add(1, Ordering::Relaxed);
     let _slot = ClientSlot(&s.clients);
@@ -372,7 +388,7 @@ async fn client(mut socket: WebSocket, s: Arc<Shared>) {
     // twice (harmless) instead of never.
     let mut rx = s.tx.subscribe();
     let snapshot = s.frame.read().unwrap().clone();
-    if socket.send(Message::Text(snapshot)).await.is_err() {
+    if !send(&mut socket, Message::Text(snapshot)).await {
         return;
     }
     let mut ping = tokio::time::interval(PING_EVERY);
@@ -386,12 +402,12 @@ async fn client(mut socket: WebSocket, s: Arc<Shared>) {
                     Err(RecvError::Lagged(_)) => s.frame.read().unwrap().clone(),
                     Err(RecvError::Closed) => break,
                 };
-                if socket.send(Message::Text(frame)).await.is_err() {
+                if !send(&mut socket, Message::Text(frame)).await {
                     break;
                 }
             }
             _ = ping.tick() => {
-                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                if !send(&mut socket, Message::Ping(Bytes::new())).await {
                     break;
                 }
             }

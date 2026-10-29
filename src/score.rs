@@ -22,7 +22,8 @@ pub const HOUR_MS: i64 = 60 * 60 * 1000;
 /// Closed 15m bars fed to the 15m detectors (~5 days).
 const WINDOW_15M: usize = 500;
 /// Fewer closed 15m bars than this and the symbol is skipped (new listing, gap).
-const MIN_BARS: usize = 300;
+/// `pub` because the poller re-backfills any series shorter than this.
+pub const MIN_BARS: usize = 300;
 /// Last bar's open time older than this and the symbol is skipped (polls failing).
 const STALE_MS: i64 = 30 * 60 * 1000;
 
