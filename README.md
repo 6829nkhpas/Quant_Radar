@@ -2,7 +2,7 @@
 
 Every minute this service scans the top 150 Binance USDⓈ-M USDT perpetuals. It ranks the strongest **bullish** and **bearish** 15m setups, confirmed by the 1h trend, and pushes the same board to every connected client over one WebSocket. The Strat AI terminal's **Quant Radar** panel displays it. From a row, a user charts the symbol or opens the AI agent to run Find Trade on it.
 
-The service is independent of crypto-app. It reads only Binance public market data, which needs no API key, and has no database, Kafka or Redis. The only link to crypto-app is that the box's Caddy gateway proxies `wss://crypto-api.stratai.live/ws/radar` to it.
+The service is independent of crypto-app. It reads only Binance public market data, which needs no API key, and has no database, Kafka or Redis. It runs on dev-vm next to the strat-sentiment research API, and browsers reach it at `wss://sentiment-api.stratai.live/ws/radar` (Cloudflare, then the VM's nginx).
 
 ## How a symbol is scored
 
@@ -60,7 +60,7 @@ Gold is XAUUSDT, which Binance lists as a `TRADIFI_PERPETUAL`. TradFi contracts 
 ## Run
 
 ```bash
-cargo test                       # 22 tests, fixtures recorded from Binance
+cargo test                       # 31 tests, fixtures recorded from Binance
 cargo run --release              # ws://127.0.0.1:8090/ and http://127.0.0.1:8090/health
 RADAR_ONESHOT=1 cargo run --release > board.json   # one pass, print, exit
 ```
@@ -69,27 +69,44 @@ Configuration comes from the environment; every variable has a default. See `.en
 
 `GET /health` returns a JSON body: `{status, as_of, board_age_s, universe, scored, clients, used_weight_1m, liquidations_seen, liquidations_ready}`. It answers 503 once the board is more than 180 s old after warm-up.
 
-## Resources (measured 2026-10-29)
+## Resources (measured 2026-10-29/30)
 
 | | |
 |---|---|
-| Image | ~33 MB uncompressed, 11.7 MB to pull (distroless/cc + a 5.4 MB binary) |
-| Memory | 17 MiB in the container (128 MiB limit) |
-| CPU | ~13 s of mostly-waiting work per minute; 0.05% between passes (0.5 CPU limit) |
+| Image | ~45 MB uncompressed (distroless/cc + the binary) |
+| Memory | ~29 MiB idle; 1,000 clients add ~13 MiB (51 MiB peak). The per-socket read buffer is capped at 4 KiB; tungstenite's 128 KiB default cost ~122 MiB for the same 1,000. Limit 256 MiB. |
+| CPU | ~13 s of mostly-waiting work per minute, under 1% of a core; a broadcast to 1,000 clients is a 1-2 s burst (0.5 CPU limit) |
 | Binance | startup backfill ~790 weight once; steady state 150 weight/min (limit 2400/IP, self-capped at 1200); OI 150 calls per 5 min (separate 1000 per 5 min quota) |
-| Bandwidth | one ~7 KB frame per client per minute |
+| Bandwidth | one ~11.4 KB frame per client per minute (2.2 KB gzipped; the WebSocket is not compressed), ~16 GB/day at 1,000 clients connected all day |
 
 ## Deploy
 
-On every push to `main`, CI (`.github/workflows/deploy.yml`) runs `cargo test`, then builds and pushes `ghcr.io/6829nkhpas/quant_radar:{sha,latest}`. Once the repo variable `DEPLOY_HOST` is set, it also SSHes into the box and runs `docker compose pull && docker compose up -d`.
+On every push to `main`, CI (`.github/workflows/deploy.yml`) runs `cargo test`, then builds and pushes `ghcr.io/6829nkhpas/quant_radar:{sha,latest}`. While the repo variable `DEPLOY_HOST` is set, it then SSHes into dev-vm as `radar-deploy`, whose key can run only `/opt/quant-radar/update.sh` ([deploy/update.sh](deploy/update.sh)): pull `latest`, `docker compose up -d`, drop superseded radar images.
 
-### One-time box setup
+**Where it runs.** dev-vm: GCP `cs-project-sntynm1y`, `asia-south1-a`, e2-medium (2 vCPU, 4 GB), Ubuntu 24.04. The strat-sentiment research API shares the VM. The VM's IP is ephemeral, so a stop/start changes it: Cloudflare's DNS record and the `DEPLOY_HOST` variable would both need the new one.
 
-1. **GitHub settings.** Add the Actions secret `DEPLOY_SSH_KEY` and the variables `DEPLOY_HOST` and `DEPLOY_USER` (the user defaults to `stratai`).
-2. **Registry login on the box.** The GHCR package is private by default. Run `docker login ghcr.io -u <user>` with a token that has only the `read:packages` scope.
-3. **Service folder.** Create `/opt/stratai/quant-radar` containing this repo's `docker-compose.yml`, plus a `.env` if you need anything other than the defaults.
-4. **Network.** The crypto-app stack must be up first, because it creates the `stratai_stratai` network this service joins.
-5. **Gateway route.** crypto-app's `infra/caddy/routes.caddy` needs the `/ws/radar*` block, which proxies to `quant-radar:8090`.
+**Path of a client.** Browser → Cloudflare (`sentiment-api.stratai.live`, proxied) → nginx on the VM's :443 (the firewall admits 443 only from Cloudflare; the origin certificate is self-signed for that name) → `location = /ws/radar` → `127.0.0.1:8090`. Each client is two nginx connections, so nginx.conf has `worker_connections 4096` and `worker_rlimit_nofile 8192` (the stock 768 allowed ~750 radar clients).
+
+### One-time VM setup (done 2026-10-30)
+
+1. **Service folder.** `/opt/quant-radar` (root-owned) holds this repo's `docker-compose.yml` and `update.sh` (root:root 755), plus a `.env` only if a default needs changing. The repo is public, so the image pulls without a registry login. Start: `cd /opt/quant-radar && sudo docker compose up -d`.
+2. **nginx.** In `/etc/nginx/sites-available/sentiment-api`, inside the `sentiment-api.stratai.live` server:
+   ```nginx
+   location = /ws/radar {
+       proxy_pass http://127.0.0.1:8090;
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+       proxy_set_header Host $host;
+       proxy_read_timeout 120s;
+       proxy_send_timeout 120s;
+   }
+   ```
+   Then `sudo nginx -t && sudo systemctl reload nginx`.
+3. **Deploy user.** `radar-deploy`: no password, not in the `docker` group. `/etc/sudoers.d/radar-deploy` allows exactly `radar-deploy ALL=(root) NOPASSWD: /opt/quant-radar/update.sh`, and its `authorized_keys` line is `restrict,command="sudo -n /opt/quant-radar/update.sh" <CI public key>`.
+4. **GitHub settings.** Secret `DEPLOY_SSH_KEY` (that key's private half), variables `DEPLOY_HOST`, `DEPLOY_USER=radar-deploy` and `DEPLOY_FINGERPRINT` (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`, the `SHA256:…` field).
+
+Locally, `docker compose up -d` (with `TAG=local` for an image you built) serves `ws://127.0.0.1:8090`.
 
 ## quant-core is a copy
 

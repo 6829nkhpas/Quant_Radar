@@ -6,13 +6,16 @@ name: ci-deploy
 # The image job needs nothing beyond the built-in GITHUB_TOKEN (packages: write).
 # quant-core is vendored in the repo, so no other repo is read.
 #
-# The deploy job is skipped until the repo variable DEPLOY_HOST is set, so CI stays
-# green before the crypto box is rebuilt. One-time setup (Settings → Secrets and
-# variables → Actions):
-#   Secret    DEPLOY_SSH_KEY  private key for DEPLOY_USER on the box
-#   Variables DEPLOY_HOST     the box's IP
-#             DEPLOY_USER     SSH user (default: stratai)
-# and on the box, once: see README.md "One-time box setup".
+# The deploy job runs only while the repo variable DEPLOY_HOST is set (dev-vm since
+# 2026-10-30). Settings → Secrets and variables → Actions:
+#   Secret    DEPLOY_SSH_KEY      private key of `radar-deploy` on dev-vm
+#   Variables DEPLOY_HOST         dev-vm's IP
+#             DEPLOY_USER         SSH user (default: radar-deploy)
+#             DEPLOY_FINGERPRINT  the VM's SSH host key, `SHA256:…`, so a changed
+#                                 host is refused instead of trusted
+# That key can run nothing but /opt/quant-radar/update.sh (deploy/update.sh): the
+# VM forces the command, so the `script` below is only a label. Setup: README.md
+# "One-time VM setup".
 
 on:
   push:
@@ -67,11 +70,7 @@ jobs:
       - uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ vars.DEPLOY_HOST }}
-          username: ${{ vars.DEPLOY_USER || 'stratai' }}
+          username: ${{ vars.DEPLOY_USER || 'radar-deploy' }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            set -e
-            cd /opt/stratai/quant-radar
-            docker compose pull
-            docker compose up -d
-            docker image prune -f
+          fingerprint: ${{ vars.DEPLOY_FINGERPRINT }}
+          script: update

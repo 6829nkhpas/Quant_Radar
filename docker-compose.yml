@@ -1,15 +1,15 @@
-# Quant_Radar on the crypto-app box, as its own compose project.
+# Quant_Radar on dev-vm (GCP asia-south1-a, the strat-sentiment research VM), as its
+# own compose project in /opt/quant-radar.
 #
-# It joins crypto-app's docker network (`stratai_stratai`: project `stratai`,
-# network `stratai`) so that stack's Caddy can reach it as `quant-radar:8090` and
-# serve it at wss://crypto-api.stratai.live/ws/radar. No port is published: the
-# gateway is the only way in. That network must exist first (crypto-app's
-# `docker compose up` creates it; for a local test, `docker network create
-# stratai_stratai`).
+# It listens on the VM's loopback only. The host's nginx is the only way in: its
+# `sentiment-api.stratai.live` server proxies `location = /ws/radar` here, and
+# Cloudflare (the only source the firewall admits on 443) serves it to browsers at
+# wss://sentiment-api.stratai.live/ws/radar. The research API shares the VM and the
+# nginx, not this compose project.
 #
 # No healthcheck: the distroless image has no shell or curl to run one. Probe
-# `http://quant-radar:8090/health` from another container on the network instead
-# (it answers 503 when the board is more than 180 s old).
+# `curl -s http://127.0.0.1:8090/health` on the VM instead (it answers 503 when the
+# board is more than 180 s old).
 
 name: quant-radar
 
@@ -21,20 +21,16 @@ services:
       - path: .env
         required: false
     restart: unless-stopped
-    # Measured locally: ~25 MB resident and ~13 s of light work per minute.
-    mem_limit: 128m
+    ports: ["127.0.0.1:8090:8090"]
+    # Measured 2026-10-30 (cgroup anon memory): ~29 MiB idle, +13 MiB with 1,000
+    # clients after a broadcast, 51 MiB peak, back to ~30 MiB once they left. Before
+    # main.rs capped the read buffer at 4 KiB (tungstenite's default is 128 KiB per
+    # socket), the same 1,000 clients took ~122 MiB and filled the old 128m. 256m
+    # leaves wide room for RADAR_MAX_CLIENTS (2000).
+    mem_limit: 256m
     cpus: 0.5
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-    networks:
-      - stratai
-    # Local testing only — never publish it on the box:
-    # ports: ["127.0.0.1:8090:8090"]
-
-networks:
-  stratai:
-    external: true
-    name: stratai_stratai

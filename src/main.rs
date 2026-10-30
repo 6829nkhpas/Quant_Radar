@@ -41,10 +41,13 @@ use score::{Bar, Board, Cfg, HOUR_MS, LiqWindow, Scored, SymbolInputs, build_boa
 const STALE_BOARD_S: i64 = 180;
 const OI_EVERY: Duration = Duration::from_secs(5 * 60 - 10);
 const UNIVERSE_EVERY: Duration = Duration::from_secs(60 * 60);
-/// Clients send nothing we read; anything bigger than this is refused.
+/// Clients send nothing we read; anything bigger than this is refused. It is also the
+/// per-connection read buffer: tungstenite allocates its 128 KiB default up front for
+/// every socket. Measured 2026-10-30 with 1,000 clients: ~122 MiB with the default
+/// (the old 128 MiB limit filled), ~13 MiB with 4 KiB. Pongs and closes fit in 4 KiB.
 const MAX_CLIENT_MESSAGE: usize = 4096;
 const PING_EVERY: Duration = Duration::from_secs(30);
-/// A client that cannot take one ~7 KB frame in this long is dropped. Without it, a
+/// A client that cannot take one ~11 KB frame in this long is dropped. Without it, a
 /// peer that vanished without a FIN (a phone losing signal) blocks its `send` until
 /// the kernel's TCP retransmit timeout (~15 min) and holds a `RADAR_MAX_CLIENTS` slot.
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -403,7 +406,10 @@ async fn ws_handler(ws: WebSocketUpgrade, State(s): State<Arc<Shared>>) -> Respo
     if s.clients.load(Ordering::Relaxed) >= s.max_clients {
         return (StatusCode::SERVICE_UNAVAILABLE, "too many clients").into_response();
     }
-    ws.max_message_size(MAX_CLIENT_MESSAGE).max_frame_size(MAX_CLIENT_MESSAGE).on_upgrade(move |socket| client(socket, s))
+    ws.read_buffer_size(MAX_CLIENT_MESSAGE)
+        .max_message_size(MAX_CLIENT_MESSAGE)
+        .max_frame_size(MAX_CLIENT_MESSAGE)
+        .on_upgrade(move |socket| client(socket, s))
 }
 
 /// Decrements the client count on every way out of `client`.
