@@ -61,8 +61,9 @@ const LIQ_PTS: f64 = 5.0;
 /// Net liquidations in the last hour must reach this fraction of 24h quote volume.
 const LIQ_NET_OF_VOLUME: f64 = 0.0005;
 
-/// Choppy gate: efficiency ratio below this over `CHOP_BARS`, and no 15m break within
-/// `BREAK_ZERO_AGE`, scores the symbol 0 on both sides.
+/// Choppy gate: efficiency ratio below this over `CHOP_BARS`, no 15m break within
+/// `BREAK_ZERO_AGE`, AND no 1h break within `TREND_MAX_AGE` scores the symbol 0 on both
+/// sides. All three: a coin chopping on the 15m inside a live 1h trend still has a side.
 const CHOP_BARS: usize = 32;
 const CHOP_MAX_ER: f64 = 0.25;
 
@@ -561,7 +562,16 @@ pub fn score_symbol(inp: &SymbolInputs) -> Option<Scored> {
     let change_24h_pct = round2((price - day[0].c.close) / day[0].c.close * 100.0);
 
     let recent_break = latest_break(&s15).is_some_and(|b| n - 1 - b.break_idx <= BREAK_ZERO_AGE);
-    let choppy = efficiency_ratio(&closed, CHOP_BARS) < CHOP_MAX_ER && !recent_break;
+    // The same "recent" the 1h trend factor uses: a coin with a live 1h trend has a
+    // direction even while its 15m chops. Measured 2026-10-30 11:13Z: BTC's 15m had
+    // an 8h efficiency of 0.09 and no break for 59 bars, so the 15m-only gate zeroed it,
+    // while its 1h had a bearish BOS 14 bars old and a bearish EMA stack (bearish 52).
+    let recent_1h_break = s1h
+        .as_ref()
+        .and_then(latest_break)
+        .is_some_and(|b| hourly_c.len() - 1 - b.break_idx <= TREND_MAX_AGE);
+    let choppy =
+        efficiency_ratio(&closed, CHOP_BARS) < CHOP_MAX_ER && !recent_break && !recent_1h_break;
 
     let readings = Readings {
         closed: &closed,
@@ -861,6 +871,42 @@ mod tests {
         let board = build_board(vec![s], 1, 1, false, &cfg(40));
         assert!(board.bullish.is_empty() && board.bearish.is_empty());
         assert_eq!(board.scored, 1);
+    }
+
+    /// The uptrend, then `chop` bars of tight two-way chop around its last close: no
+    /// 15m swing leg of 1 ATR, so no new 15m break, and an 8h efficiency near 0.
+    fn uptrend_then_chop(chop: usize) -> Vec<Bar> {
+        let mut bars = uptrend_pullback();
+        let base = bars.last().unwrap().c.close;
+        let start = bars.len();
+        for k in 0..chop {
+            let c = if k % 2 == 0 { base + 0.15 } else { base - 0.15 };
+            bars.push(bar(start + k, base, base + 0.2 + 0.00001 * k as f64, base - 0.2, c));
+        }
+        bars
+    }
+
+    #[test]
+    fn a_15m_chop_inside_a_live_1h_trend_keeps_its_side() {
+        // 60 bars (15h) of chop: the 15m gate conditions hold, but the 1h trend's last
+        // break is ~15 1h bars old, inside TREND_MAX_AGE.
+        let bars = uptrend_then_chop(60);
+        let closed: Vec<Candle> = bars[..bars.len() - 1].iter().map(|b| b.c.clone()).collect();
+        assert!(efficiency_ratio(&closed, CHOP_BARS) < CHOP_MAX_ER);
+        let s15 = analyze_structure(&closed[closed.len() - WINDOW_15M..], &StructureConfig::default()).unwrap();
+        let n = WINDOW_15M;
+        assert!(latest_break(&s15).is_none_or(|b| n - 1 - b.break_idx > BREAK_ZERO_AGE), "no recent 15m break");
+        let s = score_symbol(&inputs("TRENDCHOPUSDT", &bars)).unwrap();
+        assert_eq!(s.side, Some(Side::Bull), "{:?}", s.row);
+        assert!(s.row.score > 0);
+        assert!(s.row.tags.iter().any(|t| t == "1h uptrend"), "{:?}", s.row.tags);
+    }
+
+    #[test]
+    fn a_1h_trend_older_than_72_hours_does_not_save_a_chopping_coin() {
+        // 320 bars (80h) of chop: the 1h trend's last break is now past TREND_MAX_AGE.
+        let s = score_symbol(&inputs("STALEUSDT", &uptrend_then_chop(320))).unwrap();
+        assert_eq!((s.side, s.row.score), (None, 0), "{:?}", s.row);
     }
 
     #[test]

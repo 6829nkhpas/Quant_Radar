@@ -17,7 +17,7 @@ Each symbol gets a 0-100 score for each side. It is listed on whichever side sco
 | OI vs price (4h) | 10 | price at least +0.5% with OI at least +1% (new longs): 10; price up with OI at most −1% (shorts covering): 4 |
 | Liquidity | 10 | equal lows swept within 24 bars: 5; shorts liquidated minus longs in the last hour at least 0.05% of 24h volume: 5 |
 
-**Choppy symbols.** A symbol scores 0 on both sides when its 32-bar efficiency ratio is below 0.25 and it has had no 15m break in 48 bars.
+**Choppy symbols.** A symbol scores 0 on both sides only when all three hold: its 32-bar (8h) efficiency ratio is below 0.25, it has had no 15m break in 48 bars, and it has had no 1h break in 72 bars. A coin chopping on the 15m inside a live 1h trend still gets a side. (Before 2026-10-30 the 1h was not checked, and BTC read "No clear setup" at 0 while its 1h trend was clearly down.)
 
 **Majors.** `RADAR_MAJORS` (default `BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,XAUUSDT`) is always scanned, even outside the top 150, and listed in the board's `majors` in that order whatever it scores. Each entry carries `side` (`bullish`, `bearish`, or `none` when choppy or balanced, with no tags or zone) and `extended`. A major still appears on the Bullish or Bearish list when it ranks there.
 
