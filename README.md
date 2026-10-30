@@ -19,6 +19,8 @@ Each symbol gets a 0-100 score for each side. It is listed on whichever side sco
 
 **Choppy symbols.** A symbol scores 0 on both sides when its 32-bar efficiency ratio is below 0.25 and it has had no 15m break in 48 bars.
 
+**Extended symbols.** A listed symbol is extended when its 4h move in the side's favour is at least 3 ATR and it has no live order block or FVG within 2 ATR of price. These are strong moves with nothing to enter at right now. They go in a separate `extended` list (up to 10 per side), so the main board holds setups a trader can act on. Their score is unchanged, and the tilt still counts them.
+
 **Live order blocks.** quant-core marks a block `mitigated` at its first touch. The radar treats a block as live if price has not come back to it yet, or if the first retest was within the last 3 closed bars and no close has gone through the far edge.
 
 **Liquidations.** These come from `!forceOrder@arr`. They count only after an hour of collection. Binance sends at most one liquidation per symbol per second, so the totals are a lower bound.
@@ -36,8 +38,12 @@ Each symbol gets a 0-100 score for each side. It is listed on whichever side sco
   "bullish": [ { "symbol": "SOLUSDT.P", "score": 82, "price": 182.41, "change_24h_pct": 4.1,
                  "zone": { "kind": "order_block", "low": 178.2, "high": 179.6, "distance_pct": -1.6 },
                  "tags": ["1h uptrend", "15m BOS up", "OI +6% 4h"] } ],
-  "bearish": [] }
+  "bearish": [],
+  "extended": { "bullish": [ { "symbol": "ALPINEUSDT.P", "score": 55, "...": "same row shape" } ],
+                "bearish": [] } }
 ```
+
+`extended` was added to v1 without a version bump: a client that doesn't know the field ignores it.
 
 - `status` is `warming_up`, with empty lists, until the first full pass finishes (about 25 s after start).
 - `zone` is `null` when there is no live zone. `zone.kind` is `order_block` or `fvg`. `distance_pct` is negative below price and positive above it.

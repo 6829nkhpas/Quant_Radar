@@ -68,6 +68,14 @@ const CHOP_MAX_ER: f64 = 0.25;
 
 const DAY_BARS: usize = 96;
 
+/// Extended: a 4h move of at least this many ATR in the side's favour (where momentum
+/// already scores in full) with NO live zone within 2 ATR (the zone factor scored 0).
+/// Strong, but nothing to enter at now — listed apart so the main board is setups a
+/// trader can act on, and these are the ones to wait on for a pullback (or a bounce).
+const EXTENDED_MIN_MOVE_ATR: f64 = MOMENTUM_MAX_ATR;
+/// Extended rows kept per side.
+const EXTENDED_TOP_N: usize = 10;
+
 // ── Inputs ───────────────────────────────────────────────────────────────────
 
 /// One kline: open time, the candle, and its quote-asset (USDT) volume.
@@ -236,6 +244,15 @@ pub struct Scored {
     pub side: Option<Side>,
     pub row: Row,
     pub quote_volume_24h: f64,
+    /// See `EXTENDED_MIN_MOVE_ATR`. Listed under `extended`, not the main board.
+    pub extended: bool,
+}
+
+/// The extended rows of each side (see `EXTENDED_MIN_MOVE_ATR`).
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct Extended {
+    pub bullish: Vec<Row>,
+    pub bearish: Vec<Row>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Default)]
@@ -260,8 +277,12 @@ pub struct Board {
     pub scored: usize,
     pub tilt: Tilt,
     pub liquidations_ready: bool,
+    /// Setups with an entry zone near price (or not stretched): the board proper.
     pub bullish: Vec<Row>,
     pub bearish: Vec<Row>,
+    /// Strong but stretched away from any zone. Added to v1 without a version bump: a
+    /// client that does not know the field ignores it.
+    pub extended: Extended,
 }
 
 impl Board {
@@ -279,6 +300,7 @@ impl Board {
             liquidations_ready: false,
             bullish: Vec::new(),
             bearish: Vec::new(),
+            extended: Extended::default(),
         }
     }
 }
@@ -333,6 +355,10 @@ struct SideScore {
     total: f64,
     tags: Vec<(f64, String)>,
     zone: Option<BoardZone>,
+    /// What the zone factor scored (0 = no live zone within 2 ATR).
+    zone_pts: f64,
+    /// The 4h move in ATR, in this side's favour (negative = against it).
+    move_atr: f64,
 }
 
 struct Readings<'a> {
@@ -403,6 +429,7 @@ fn score_side(r: &Readings, side: Side) -> SideScore {
             }
         }
     }
+    let mut zone_pts = 0.0;
     let board_zone = zone.map(|(dist, kind, low, high)| {
         let pts = if dist <= 0.0 {
             ZONE_INSIDE_PTS
@@ -413,6 +440,7 @@ fn score_side(r: &Readings, side: Side) -> SideScore {
         } else {
             0.0
         };
+        zone_pts = pts;
         if pts > 0.0 {
             let at = if dist <= 0.0 { "At" } else { "Near" };
             let name = if kind == "order_block" { "OB" } else { "FVG" };
@@ -461,7 +489,7 @@ fn score_side(r: &Readings, side: Side) -> SideScore {
     }
 
     let total = tags.iter().map(|(p, _)| p).sum();
-    SideScore { total, tags, zone: board_zone }
+    SideScore { total, tags, zone: board_zone, zone_pts, move_atr }
 }
 
 /// `$1.2M`, `$350K`, `$900`.
@@ -542,6 +570,7 @@ pub fn score_symbol(inp: &SymbolInputs) -> Option<Scored> {
     } else {
         (None, bull, 0)
     };
+    let extended = side.is_some() && chosen.zone_pts == 0.0 && chosen.move_atr >= EXTENDED_MIN_MOVE_ATR;
     let mut tags = chosen.tags;
     tags.sort_by(|a, b| b.0.total_cmp(&a.0));
     Some(Scored {
@@ -555,12 +584,14 @@ pub fn score_symbol(inp: &SymbolInputs) -> Option<Scored> {
             tags: tags.into_iter().take(3).map(|(_, t)| t).collect(),
         },
         quote_volume_24h: qv24,
+        extended,
     })
 }
 
 /// Rank the scored symbols into the board: one side per symbol, at least `min_score`,
-/// strongest first (ties to the higher 24h quote volume), `top_n` per side. The tilt
-/// counts every qualifying symbol, not only the listed ones.
+/// strongest first (ties to the higher 24h quote volume), `top_n` per side on the board
+/// proper and `EXTENDED_TOP_N` per side under `extended`. The tilt counts every
+/// qualifying symbol, extended or not, listed or not.
 pub fn build_board(scored: Vec<Scored>, as_of: i64, universe: usize, liquidations_ready: bool, cfg: &Cfg) -> Board {
     let count = scored.len();
     let mut bull: Vec<Scored> = Vec::new();
@@ -576,17 +607,22 @@ pub fn build_board(scored: Vec<Scored>, as_of: i64, universe: usize, liquidation
         }
     }
     let tilt = Tilt { bullish: bull.len(), bearish: bear.len() };
-    let rank = |mut v: Vec<Scored>| -> Vec<Row> {
+    let rank = |v: &[Scored], extended: bool, n: usize| -> Vec<Row> {
+        let mut v: Vec<&Scored> = v.iter().filter(|s| s.extended == extended).collect();
         v.sort_by(|a, b| b.row.score.cmp(&a.row.score).then(b.quote_volume_24h.total_cmp(&a.quote_volume_24h)));
-        v.into_iter().take(cfg.top_n).map(|s| s.row).collect()
+        v.into_iter().take(n).map(|s| s.row.clone()).collect()
     };
     Board {
         status: "ready",
         scored: count,
         tilt,
         liquidations_ready,
-        bullish: rank(bull),
-        bearish: rank(bear),
+        bullish: rank(&bull, false, cfg.top_n),
+        bearish: rank(&bear, false, cfg.top_n),
+        extended: Extended {
+            bullish: rank(&bull, true, EXTENDED_TOP_N),
+            bearish: rank(&bear, true, EXTENDED_TOP_N),
+        },
         ..Board::warming_up(as_of, universe)
     }
 }
@@ -859,7 +895,57 @@ mod tests {
             side,
             row: Row { symbol: format!("{sym}.P"), score, price: 1.0, change_24h_pct: 0.0, zone: None, tags: vec![] },
             quote_volume_24h: qv,
+            extended: false,
         }
+    }
+
+    #[test]
+    fn a_runaway_rally_with_no_zone_near_is_extended() {
+        // The uptrend, then 20 bars straight up whose ranges overlap (no fair value gap
+        // of their own), so the nearest zone is the base the rally left behind.
+        let mut bars = uptrend_pullback();
+        let mut close = bars.last().unwrap().c.close;
+        let start = bars.len();
+        for k in 0..20 {
+            let open = close;
+            close = open + 1.0;
+            bars.push(bar(start + k, open, close + 0.6, open - 0.6, close));
+        }
+        let s = score_symbol(&inputs("RUNUSDT", &bars)).unwrap();
+        println!("{:?}", s.row);
+        assert_eq!(s.side, Some(Side::Bull));
+        assert!(s.extended, "{:?}", s.row);
+        assert!(!s.row.tags.iter().any(|t| t.starts_with("At ") || t.starts_with("Near ")), "{:?}", s.row.tags);
+        // The same trend sitting in its order block is the board proper.
+        let at_zone = score_symbol(&inputs("TESTUSDT", &uptrend_pullback())).unwrap();
+        assert!(!at_zone.extended, "{:?}", at_zone.row);
+    }
+
+    #[test]
+    fn extended_rows_are_listed_apart_and_still_counted_in_the_tilt() {
+        let mut far = scored("FAR", Some(Side::Bull), 90, 1.0);
+        far.extended = true;
+        let mut far_bear = scored("DUMP", Some(Side::Bear), 70, 1.0);
+        far_bear.extended = true;
+        let mut many: Vec<Scored> = (0..15)
+            .map(|i| {
+                let mut s = scored(&format!("E{i}"), Some(Side::Bull), 50 + i, 1.0);
+                s.extended = true;
+                s
+            })
+            .collect();
+        many.extend([far, far_bear, scored("NEAR", Some(Side::Bull), 60, 1.0)]);
+        let b = build_board(many, 1, 150, true, &Cfg { top_n: 20, min_score: 40 });
+        assert_eq!(b.bullish.iter().map(|r| r.symbol.as_str()).collect::<Vec<_>>(), vec!["NEAR.P"]);
+        assert!(b.bearish.is_empty());
+        assert_eq!(b.extended.bullish.len(), EXTENDED_TOP_N);
+        assert_eq!(b.extended.bullish[0].symbol, "FAR.P");
+        assert_eq!(b.extended.bearish.iter().map(|r| r.symbol.as_str()).collect::<Vec<_>>(), vec!["DUMP.P"]);
+        assert_eq!(b.tilt, Tilt { bullish: 17, bearish: 1 });
+        let v = serde_json::to_value(&b).unwrap();
+        assert_eq!(v["extended"]["bullish"][0]["symbol"], "FAR.P");
+        let w = serde_json::to_value(Board::warming_up(1, 0)).unwrap();
+        assert_eq!(w["extended"], serde_json::json!({ "bullish": [], "bearish": [] }));
     }
 
     #[test]
