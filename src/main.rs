@@ -35,7 +35,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::time::Instant;
 
 use binance::{Binance, Liquidations, now_ms, parse_force_order};
-use score::{Bar, Board, Cfg, HOUR_MS, Scored, SymbolInputs, build_board, merge_bars, score_symbol};
+use score::{Bar, Board, Cfg, HOUR_MS, LiqWindow, Scored, SymbolInputs, build_board, merge_bars, score_symbol};
 
 /// A board older than this (once warmed up) makes `/health` answer 503.
 const STALE_BOARD_S: i64 = 180;
@@ -59,6 +59,7 @@ struct Config {
     interval_secs: u64,
     max_weight: u32,
     max_clients: usize,
+    liq_warmup_mins: i64,
     fapi: String,
     fstream: String,
     oneshot: bool,
@@ -84,6 +85,7 @@ impl Config {
             interval_secs: env_or("RADAR_SCORE_INTERVAL_SECS", 60u64).clamp(15, 900),
             max_weight: env_or("RADAR_MAX_WEIGHT_1M", 1200u32).clamp(100, 2400),
             max_clients: env_or("RADAR_MAX_CLIENTS", 2000usize).max(1),
+            liq_warmup_mins: env_or("RADAR_LIQ_WARMUP_MINS", 60i64).clamp(0, 240),
             fapi: env_or("BINANCE_FAPI_BASE", "https://fapi.binance.com".to_string()),
             fstream: env_or("BINANCE_FSTREAM_BASE", "wss://fstream.binance.com".to_string()),
             oneshot: env_or("RADAR_ONESHOT", 0u8) == 1,
@@ -111,7 +113,7 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(binance: Arc<Binance>, max_clients: usize) -> Arc<Self> {
+    fn new(binance: Arc<Binance>, max_clients: usize, liq_warmup_mins: i64) -> Arc<Self> {
         let board = Board::warming_up(now_ms() / 1000, 0);
         let (tx, _) = broadcast::channel(16);
         Arc::new(Shared {
@@ -120,7 +122,7 @@ impl Shared {
             health: Mutex::new(HealthState { status: board.status, as_of: board.as_of, universe: 0, scored: 0 }),
             clients: AtomicUsize::new(0),
             max_clients,
-            liqs: Mutex::new(Liquidations::default()),
+            liqs: Mutex::new(Liquidations::new(liq_warmup_mins * 60_000)),
             universe: RwLock::new(HashSet::new()),
             binance,
         })
@@ -228,6 +230,18 @@ impl Scanner {
                 if ready { self.symbols.iter().map(|s| (s.as_str(), liqs.window(s, now, HOUR_MS))).collect() } else { HashMap::new() };
             (ready, w)
         };
+        if ready {
+            // What the liquidation factor is reading, in exact dollars, so it can be checked
+            // against the raw stream: the board shows at most 3 tags and the 5-point
+            // liquidation tag rarely makes the cut.
+            let gross = |w: &LiqWindow| w.long_usd + w.short_usd;
+            let mut active: Vec<(&str, LiqWindow)> = windows.iter().filter(|(_, w)| gross(w) > 0.0).map(|(s, w)| (*s, *w)).collect();
+            active.sort_by(|a, b| gross(&b.1).total_cmp(&gross(&a.1)).then(a.0.cmp(b.0)));
+            let (long, short) = active.iter().fold((0.0, 0.0), |(l, s), (_, w)| (l + w.long_usd, s + w.short_usd));
+            let top: Vec<String> =
+                active.iter().take(5).map(|(s, w)| format!("{s} longs ${:.0} / shorts ${:.0}", w.long_usd, w.short_usd)).collect();
+            info!("[liq] last 1h: {} symbols, longs ${long:.0}, shorts ${short:.0}; top: {}", active.len(), top.join(", "));
+        }
         let scored: Vec<Scored> = tokio::task::block_in_place(|| {
             self.symbols
                 .iter()
@@ -424,7 +438,7 @@ async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cfg = Arc::new(Config::from_env());
     let bn = Arc::new(Binance::new(cfg.fapi.clone(), cfg.max_weight));
-    let shared = Shared::new(bn, cfg.max_clients);
+    let shared = Shared::new(bn, cfg.max_clients, cfg.liq_warmup_mins);
 
     if cfg.oneshot {
         let started = Instant::now();
@@ -466,7 +480,7 @@ mod tests {
     }
 
     fn shared() -> Arc<Shared> {
-        Shared::new(Arc::new(Binance::new("http://127.0.0.1:9".into(), 1200)), 10)
+        Shared::new(Arc::new(Binance::new("http://127.0.0.1:9".into(), 1200)), 10, 60)
     }
 
     async fn next_text(ws: &mut (impl futures_util::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>> + Unpin)) -> String {

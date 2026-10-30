@@ -303,14 +303,19 @@ pub fn parse_force_order(raw: &str) -> Option<Liquidation> {
 /// orders in one second counts once. The exact figure needs the per-symbol
 /// `<symbol>@forceOrder` streams (same 1 s snapshot) or the account-only REST history;
 /// neither is available here, and a lower bound still ranks one side against the other.
-#[derive(Default)]
 pub struct Liquidations {
     by_symbol: HashMap<String, VecDeque<(i64, bool, f64)>>,
     first_frame_ms: Option<i64>,
+    /// How long after the first frame the 1h window is trusted (`RADAR_LIQ_WARMUP_MINS`).
+    warmup_ms: i64,
     pub seen: u64,
 }
 
 impl Liquidations {
+    pub fn new(warmup_ms: i64) -> Self {
+        Liquidations { by_symbol: HashMap::new(), first_frame_ms: None, warmup_ms, seen: 0 }
+    }
+
     pub fn record(&mut self, l: Liquidation, now: i64) {
         self.first_frame_ms.get_or_insert(now);
         self.seen += 1;
@@ -341,9 +346,10 @@ impl Liquidations {
         w
     }
 
-    /// An hour after the first frame: before that a window would under-count.
+    /// `warmup_ms` after the first frame (an hour by default): before a full hour the
+    /// 1h window under-counts, so a shorter warm-up is for local checks only.
     pub fn ready(&self, now: i64) -> bool {
-        self.first_frame_ms.is_some_and(|f| now - f >= HOUR_MS)
+        self.first_frame_ms.is_some_and(|f| now - f >= self.warmup_ms)
     }
 }
 
@@ -487,7 +493,7 @@ mod tests {
     #[test]
     fn liquidation_windows_sum_by_side_and_evict_after_four_hours() {
         let now = 10 * HOUR_MS;
-        let mut l = Liquidations::default();
+        let mut l = Liquidations::new(HOUR_MS);
         assert!(!l.ready(now));
         let liq = |ts: i64, is_long: bool, usd: f64| Liquidation { symbol: "XUSDT".into(), ts, is_long, usd };
         l.record(liq(now - 5 * HOUR_MS, true, 999.0), now - 5 * HOUR_MS);
@@ -506,5 +512,13 @@ mod tests {
         assert_eq!(l.window("XUSDT", later, 4 * HOUR_MS), LiqWindow { long_usd: 0.0, short_usd: 300.0 });
         l.prune(now + 5 * HOUR_MS);
         assert!(l.by_symbol.is_empty());
+    }
+
+    #[test]
+    fn the_warm_up_is_measured_from_the_first_frame() {
+        let mut l = Liquidations::new(5 * 60_000);
+        l.record(Liquidation { symbol: "XUSDT".into(), ts: 1_000, is_long: true, usd: 1.0 }, 1_000);
+        assert!(!l.ready(1_000 + 5 * 60_000 - 1));
+        assert!(l.ready(1_000 + 5 * 60_000));
     }
 }
