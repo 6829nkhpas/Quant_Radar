@@ -108,6 +108,8 @@ pub struct SymbolInputs<'a> {
 pub struct Cfg {
     pub top_n: usize,
     pub min_score: u32,
+    /// Bare symbols listed under `majors` whatever they score, in this order.
+    pub majors: Vec<String>,
 }
 
 /// Parse a Binance `/fapi/v1/klines` body. Rows with a non-finite field are dropped
@@ -248,6 +250,16 @@ pub struct Scored {
     pub extended: bool,
 }
 
+/// A major's current reading, listed whatever it scores: the row plus its side
+/// (`bullish`, `bearish`, or `none` when choppy or balanced) and whether it is extended.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct MajorRow {
+    #[serde(flatten)]
+    pub row: Row,
+    pub side: &'static str,
+    pub extended: bool,
+}
+
 /// The extended rows of each side (see `EXTENDED_MIN_MOVE_ATR`).
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct Extended {
@@ -283,6 +295,9 @@ pub struct Board {
     /// Strong but stretched away from any zone. Added to v1 without a version bump: a
     /// client that does not know the field ignores it.
     pub extended: Extended,
+    /// `RADAR_MAJORS` in their configured order, each with its reading whatever it
+    /// scores; a major that could not be scored this pass is left out. Also additive.
+    pub majors: Vec<MajorRow>,
 }
 
 impl Board {
@@ -301,6 +316,7 @@ impl Board {
             bullish: Vec::new(),
             bearish: Vec::new(),
             extended: Extended::default(),
+            majors: Vec::new(),
         }
     }
 }
@@ -571,7 +587,9 @@ pub fn score_symbol(inp: &SymbolInputs) -> Option<Scored> {
         (None, bull, 0)
     };
     let extended = side.is_some() && chosen.zone_pts == 0.0 && chosen.move_atr >= EXTENDED_MIN_MOVE_ATR;
-    let mut tags = chosen.tags;
+    // With no side the row is "no clear setup": `chosen` is the bullish reading only as a
+    // placeholder, so its reasons and zone would claim a direction the score denies.
+    let (mut tags, zone) = if side.is_some() { (chosen.tags, chosen.zone) } else { (Vec::new(), None) };
     tags.sort_by(|a, b| b.0.total_cmp(&a.0));
     Some(Scored {
         side,
@@ -580,7 +598,7 @@ pub fn score_symbol(inp: &SymbolInputs) -> Option<Scored> {
             score: score.min(100),
             price,
             change_24h_pct,
-            zone: chosen.zone,
+            zone,
             tags: tags.into_iter().take(3).map(|(_, t)| t).collect(),
         },
         quote_volume_24h: qv24,
@@ -594,6 +612,19 @@ pub fn score_symbol(inp: &SymbolInputs) -> Option<Scored> {
 /// qualifying symbol, extended or not, listed or not.
 pub fn build_board(scored: Vec<Scored>, as_of: i64, universe: usize, liquidations_ready: bool, cfg: &Cfg) -> Board {
     let count = scored.len();
+    let majors: Vec<MajorRow> = cfg
+        .majors
+        .iter()
+        .filter_map(|m| {
+            let want = format!("{m}.P");
+            let s = scored.iter().find(|s| s.row.symbol == want)?;
+            Some(MajorRow {
+                row: s.row.clone(),
+                side: s.side.map_or("none", Side::word),
+                extended: s.extended,
+            })
+        })
+        .collect();
     let mut bull: Vec<Scored> = Vec::new();
     let mut bear: Vec<Scored> = Vec::new();
     for s in scored {
@@ -623,6 +654,7 @@ pub fn build_board(scored: Vec<Scored>, as_of: i64, universe: usize, liquidation
             bullish: rank(&bull, true, EXTENDED_TOP_N),
             bearish: rank(&bear, true, EXTENDED_TOP_N),
         },
+        majors,
         ..Board::warming_up(as_of, universe)
     }
 }
@@ -826,7 +858,7 @@ mod tests {
         assert!(efficiency_ratio(&closed, CHOP_BARS) < CHOP_MAX_ER, "the gate's condition holds");
         let s = score_symbol(&inputs("FLATUSDT", &bars)).unwrap();
         assert_eq!((s.side, s.row.score), (None, 0));
-        let board = build_board(vec![s], 1, 1, false, &Cfg { top_n: 20, min_score: 40 });
+        let board = build_board(vec![s], 1, 1, false, &cfg(40));
         assert!(board.bullish.is_empty() && board.bearish.is_empty());
         assert_eq!(board.scored, 1);
     }
@@ -899,6 +931,62 @@ mod tests {
         }
     }
 
+    fn cfg(min_score: u32) -> Cfg {
+        Cfg { top_n: 20, min_score, majors: Vec::new() }
+    }
+
+    #[test]
+    fn majors_are_listed_in_order_whatever_they_score() {
+        let mut eth = scored("ETHUSDT", None, 0, 9.0);
+        eth.row.tags = Vec::new();
+        let mut gold = scored("XAUUSDT", Some(Side::Bear), 52, 1.0);
+        gold.extended = true;
+        let v = vec![
+            scored("SOLUSDT", Some(Side::Bull), 90, 1.0),
+            gold,
+            scored("BTCUSDT", Some(Side::Bull), 12, 9.0),
+            eth,
+        ];
+        let c = Cfg {
+            majors: ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "XAUUSDT"].iter().map(|s| s.to_string()).collect(),
+            ..cfg(40)
+        };
+        let b = build_board(v, 1, 150, true, &c);
+        // Configured order, not score order; DOGE was not scored this pass and is skipped.
+        let got: Vec<(&str, &str, bool, u32)> =
+            b.majors.iter().map(|m| (m.row.symbol.as_str(), m.side, m.extended, m.row.score)).collect();
+        assert_eq!(
+            got,
+            vec![("BTCUSDT.P", "bullish", false, 12), ("ETHUSDT.P", "none", false, 0), ("XAUUSDT.P", "bearish", true, 52)]
+        );
+        // BTC below min_score is a major but not on the board; gold stays on the board too.
+        assert!(!b.bullish.iter().any(|r| r.symbol == "BTCUSDT.P"));
+        assert_eq!(b.extended.bearish[0].symbol, "XAUUSDT.P");
+        assert_eq!(b.bullish[0].symbol, "SOLUSDT.P");
+
+        let v = serde_json::to_value(&b).unwrap();
+        let m = &v["majors"][2];
+        for k in ["symbol", "score", "price", "change_24h_pct", "zone", "tags", "side", "extended"] {
+            assert!(m.get(k).is_some(), "major missing {k}");
+        }
+        assert_eq!((m["side"].as_str(), m["extended"].as_bool()), (Some("bearish"), Some(true)));
+        assert_eq!(serde_json::to_value(Board::warming_up(1, 0)).unwrap()["majors"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_row_with_no_side_carries_no_reasons_or_zone() {
+        let bars: Vec<Bar> = (0..400)
+            .map(|i| {
+                let c = if i % 2 == 0 { 100.3 } else { 99.7 };
+                bar(i, 100.0, 100.4 + 0.0001 * i as f64, 99.6, c)
+            })
+            .collect();
+        let s = score_symbol(&inputs("FLATUSDT", &bars)).unwrap();
+        assert_eq!(s.side, None);
+        assert!(s.row.tags.is_empty(), "{:?}", s.row.tags);
+        assert_eq!(s.row.zone, None);
+    }
+
     #[test]
     fn a_runaway_rally_with_no_zone_near_is_extended() {
         // The uptrend, then 20 bars straight up whose ranges overlap (no fair value gap
@@ -935,7 +1023,7 @@ mod tests {
             })
             .collect();
         many.extend([far, far_bear, scored("NEAR", Some(Side::Bull), 60, 1.0)]);
-        let b = build_board(many, 1, 150, true, &Cfg { top_n: 20, min_score: 40 });
+        let b = build_board(many, 1, 150, true, &cfg(40));
         assert_eq!(b.bullish.iter().map(|r| r.symbol.as_str()).collect::<Vec<_>>(), vec!["NEAR.P"]);
         assert!(b.bearish.is_empty());
         assert_eq!(b.extended.bullish.len(), EXTENDED_TOP_N);
@@ -955,7 +1043,7 @@ mod tests {
         v.push(scored("TIELO", Some(Side::Bear), 70, 1.0));
         v.push(scored("WEAK", Some(Side::Bear), 39, 1.0));
         v.push(scored("NONE", None, 0, 1.0));
-        let b = build_board(v, 1_767_000_000, 150, true, &Cfg { top_n: 20, min_score: 40 });
+        let b = build_board(v, 1_767_000_000, 150, true, &cfg(40));
         assert_eq!(b.bullish.len(), 20);
         assert_eq!(b.bullish[0].symbol, "B24.P");
         assert!(b.bullish.windows(2).all(|w| w[0].score >= w[1].score));
@@ -971,7 +1059,7 @@ mod tests {
         let mut s = scored("SOLUSDT", Some(Side::Bull), 82, 1.0);
         s.row.zone = Some(BoardZone { kind: "order_block", low: 178.2, high: 179.6, distance_pct: -1.6 });
         s.row.tags = vec!["1h uptrend".into()];
-        let b = build_board(vec![s], 1_767_000_000, 150, true, &Cfg { top_n: 20, min_score: 40 });
+        let b = build_board(vec![s], 1_767_000_000, 150, true, &cfg(40));
         let v: serde_json::Value = serde_json::to_value(&b).unwrap();
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(|k| k.as_str()).collect();
         for k in ["type", "v", "status", "as_of", "timeframe", "trend_timeframe", "universe", "scored", "tilt", "liquidations_ready", "bullish", "bearish"] {
@@ -996,7 +1084,7 @@ mod tests {
         let now = real.last().unwrap().t + BAR_MS / 2;
         let mut all = vec![score_symbol(&SymbolInputs { symbol: "BTCUSDT", bars: &real, now_ms: now, oi_4h_change_pct: None, liq_1h: None })];
         all.push(score_symbol(&inputs("UPUSDT", &up)));
-        let b = build_board(all.into_iter().flatten().collect(), now / 1000, 2, false, &Cfg { top_n: 20, min_score: 0 });
+        let b = build_board(all.into_iter().flatten().collect(), now / 1000, 2, false, &cfg(0));
         println!("{}", serde_json::to_string_pretty(&b).unwrap());
         assert_eq!(b.scored, 2);
     }

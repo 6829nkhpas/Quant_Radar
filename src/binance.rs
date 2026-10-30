@@ -80,12 +80,17 @@ struct Ticker {
     quote_volume: String,
 }
 
-/// The top `n` USDT perpetuals by 24h quote volume, bare symbols, highest first.
+/// The top `n` USDT perpetuals by 24h quote volume, bare symbols, highest first, then
+/// every one of `majors` not already among them (in `majors` order).
 ///
-/// `contractType == "PERPETUAL"` on purpose: Binance also lists `TRADIFI_PERPETUAL`
-/// contracts (gold, stocks: XAUUSDT, TSLAUSDT — 235 of them on 2026-10-29), which are
-/// not crypto and trade on a different clock.
-pub fn rank_universe(exchange_info: &str, tickers: &str, n: usize) -> Result<Vec<String>, String> {
+/// The ranked part is `contractType == "PERPETUAL"` only: Binance also lists
+/// `TRADIFI_PERPETUAL` contracts (stocks, commodities: XAUUSDT, TSLAUSDT — 235 of them
+/// on 2026-10-29), and those stay out of the ranking. A major may be either type, so a
+/// TradFi contract gets in only by being named in `RADAR_MAJORS` — gold (XAUUSDT),
+/// checked 2026-10-30 to trade 24/7 (continuous 4h klines through the 24-25 Oct
+/// weekend), so it scores like any perp. A major that is not listed, not TRADING, not
+/// USDT-quoted or of another contract type (a dated quarterly) is skipped.
+pub fn rank_universe(exchange_info: &str, tickers: &str, n: usize, majors: &[String]) -> Result<Vec<String>, String> {
     let info: ExchangeInfo = serde_json::from_str(exchange_info).map_err(|e| format!("exchangeInfo: {e}"))?;
     let tickers: Vec<Ticker> = serde_json::from_str(tickers).map_err(|e| format!("ticker/24hr: {e}"))?;
     let volume: HashMap<&str, f64> = tickers
@@ -104,7 +109,19 @@ pub fn rank_universe(exchange_info: &str, tickers: &str, n: usize) -> Result<Vec
         .filter_map(|s| volume.get(s.symbol.as_str()).map(|v| (s.symbol.as_str(), *v)))
         .collect();
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
-    Ok(ranked.into_iter().take(n).map(|(s, _)| s.to_string()).collect())
+    let mut out: Vec<String> = ranked.into_iter().take(n).map(|(s, _)| s.to_string()).collect();
+    for m in majors {
+        let listed = info.symbols.iter().any(|s| {
+            s.symbol == *m
+                && (s.contract_type == "PERPETUAL" || s.contract_type == "TRADIFI_PERPETUAL")
+                && s.status == "TRADING"
+                && s.quote_asset == "USDT"
+        });
+        if listed && !out.contains(m) {
+            out.push(m.clone());
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Deserialize)]
@@ -238,10 +255,10 @@ impl Binance {
         Err(format!("{path}: still rate limited after 3 attempts"))
     }
 
-    pub async fn universe(&self, n: usize) -> Result<Vec<String>, String> {
+    pub async fn universe(&self, n: usize, majors: &[String]) -> Result<Vec<String>, String> {
         let info = self.get("/fapi/v1/exchangeInfo", &[]).await?;
         let tickers = self.get("/fapi/v1/ticker/24hr", &[]).await?;
-        rank_universe(&info, &tickers, n)
+        rank_universe(&info, &tickers, n, majors)
     }
 
     pub async fn klines(&self, symbol: &str, limit: usize) -> Result<Vec<Bar>, String> {
@@ -415,10 +432,26 @@ mod tests {
     fn the_universe_is_usdt_perps_by_volume_without_stablecoins() {
         // The fixture also holds USDCUSDT (stable base), XAUUSDT (TRADIFI_PERPETUAL),
         // OMGUSDT (SETTLING, no ticker), BTCUSDC (USDC quote), BTCUSDT_261225 (quarterly).
-        let all = rank_universe(EXCHANGE_INFO, TICKERS, 10).unwrap();
+        let all = rank_universe(EXCHANGE_INFO, TICKERS, 10, &[]).unwrap();
         assert_eq!(all, vec!["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]);
-        assert_eq!(rank_universe(EXCHANGE_INFO, TICKERS, 2).unwrap(), vec!["BTCUSDT", "ETHUSDT"]);
-        assert!(rank_universe("{}", TICKERS, 2).is_err());
+        assert_eq!(rank_universe(EXCHANGE_INFO, TICKERS, 2, &[]).unwrap(), vec!["BTCUSDT", "ETHUSDT"]);
+        assert!(rank_universe("{}", TICKERS, 2, &[]).is_err());
+    }
+
+    #[test]
+    fn majors_join_the_universe_and_only_they_may_be_tradfi() {
+        let majors: Vec<String> =
+            ["BTCUSDT", "XAUUSDT", "OMGUSDT", "NOPEUSDT", "BTCUSDT_261225"].iter().map(|s| s.to_string()).collect();
+        // XAUUSDT (TRADIFI_PERPETUAL) is appended; BTC is not doubled; the settling,
+        // unlisted and quarterly ones are skipped.
+        assert_eq!(
+            rank_universe(EXCHANGE_INFO, TICKERS, 10, &majors).unwrap(),
+            vec!["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT", "XAUUSDT"]
+        );
+        // A major outside the top n is still scanned.
+        assert_eq!(rank_universe(EXCHANGE_INFO, TICKERS, 2, &majors).unwrap(), vec!["BTCUSDT", "ETHUSDT", "XAUUSDT"]);
+        let sol = vec!["SOLUSDT".to_string()];
+        assert_eq!(rank_universe(EXCHANGE_INFO, TICKERS, 1, &sol).unwrap(), vec!["BTCUSDT", "SOLUSDT"]);
     }
 
     fn oi_points() -> Vec<(i64, f64)> {

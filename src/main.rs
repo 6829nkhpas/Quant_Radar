@@ -60,9 +60,25 @@ struct Config {
     max_weight: u32,
     max_clients: usize,
     liq_warmup_mins: i64,
+    /// Bare symbols always scanned and listed under the board's Majors, in this order.
+    majors: Vec<String>,
     fapi: String,
     fstream: String,
     oneshot: bool,
+}
+
+/// Binance's most-traded perps plus gold. `RADAR_MAJORS` replaces the whole list.
+const DEFAULT_MAJORS: &str = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,XAUUSDT";
+
+/// A comma list: trimmed, upper-cased, de-duplicated (first wins), empties dropped.
+fn parse_majors(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in raw.split(',').map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()) {
+        if !out.contains(&s) {
+            out.push(s);
+        }
+    }
+    out
 }
 
 fn env_or<T: FromStr>(key: &str, default: T) -> T {
@@ -86,6 +102,7 @@ impl Config {
             max_weight: env_or("RADAR_MAX_WEIGHT_1M", 1200u32).clamp(100, 2400),
             max_clients: env_or("RADAR_MAX_CLIENTS", 2000usize).max(1),
             liq_warmup_mins: env_or("RADAR_LIQ_WARMUP_MINS", 60i64).clamp(0, 240),
+            majors: parse_majors(&env_or("RADAR_MAJORS", DEFAULT_MAJORS.to_string())),
             fapi: env_or("BINANCE_FAPI_BASE", "https://fapi.binance.com".to_string()),
             fstream: env_or("BINANCE_FSTREAM_BASE", "wss://fstream.binance.com".to_string()),
             oneshot: env_or("RADAR_ONESHOT", 0u8) == 1,
@@ -256,13 +273,20 @@ impl Scanner {
                 })
                 .collect()
         });
-        build_board(scored, now / 1000, self.symbols.len(), ready, &Cfg { top_n: cfg.top_n, min_score: cfg.min_score })
+        let board_cfg = Cfg { top_n: cfg.top_n, min_score: cfg.min_score, majors: cfg.majors.clone() };
+        build_board(scored, now / 1000, self.symbols.len(), ready, &board_cfg)
     }
 }
 
-async fn fetch_universe(bn: &Binance, n: usize) -> Option<Vec<String>> {
-    match bn.universe(n).await {
-        Ok(u) if !u.is_empty() => Some(u),
+async fn fetch_universe(bn: &Binance, n: usize, majors: &[String]) -> Option<Vec<String>> {
+    match bn.universe(n, majors).await {
+        Ok(u) if !u.is_empty() => {
+            let missing: Vec<&str> = majors.iter().filter(|m| !u.contains(m)).map(String::as_str).collect();
+            if !missing.is_empty() {
+                warn!("[scan] majors not listed as tradable USDT perps on Binance, skipped: {}", missing.join(", "));
+            }
+            Some(u)
+        }
         Ok(_) => {
             warn!("[scan] the universe came back empty");
             None
@@ -283,7 +307,7 @@ fn set_universe(shared: &Shared, symbols: &[String]) {
 async fn run_scanner(shared: Arc<Shared>, cfg: Arc<Config>) {
     let bn = shared.binance.clone();
     let symbols = loop {
-        if let Some(u) = fetch_universe(&bn, cfg.universe).await {
+        if let Some(u) = fetch_universe(&bn, cfg.universe, &cfg.majors).await {
             break u;
         }
         if cfg.oneshot {
@@ -303,7 +327,7 @@ async fn run_scanner(shared: Arc<Shared>, cfg: Arc<Config>) {
         let started = Instant::now();
         if universe_at.elapsed() >= UNIVERSE_EVERY {
             universe_at = Instant::now();
-            if let Some(u) = fetch_universe(&bn, cfg.universe).await {
+            if let Some(u) = fetch_universe(&bn, cfg.universe, &cfg.majors).await {
                 let keep: HashSet<&String> = u.iter().collect();
                 scan.series.retain(|k, _| keep.contains(k));
                 scan.oi.retain(|k, _| keep.contains(k));
@@ -536,6 +560,14 @@ mod tests {
         board.as_of -= STALE_BOARD_S + 5;
         s.publish(&board);
         assert_eq!(reqwest::get(&url).await.unwrap().status(), 503);
+    }
+
+    #[test]
+    fn majors_parse_in_order_without_blanks_or_duplicates() {
+        assert_eq!(parse_majors(" btcusdt, ETHUSDT,,BTCUSDT , xauusdt "), vec!["BTCUSDT", "ETHUSDT", "XAUUSDT"]);
+        assert!(parse_majors(" , ").is_empty());
+        assert_eq!(parse_majors(DEFAULT_MAJORS).len(), 7);
+        assert_eq!(parse_majors(DEFAULT_MAJORS).last().map(String::as_str), Some("XAUUSDT"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

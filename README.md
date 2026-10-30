@@ -19,6 +19,10 @@ Each symbol gets a 0-100 score for each side. It is listed on whichever side sco
 
 **Choppy symbols.** A symbol scores 0 on both sides when its 32-bar efficiency ratio is below 0.25 and it has had no 15m break in 48 bars.
 
+**Majors.** `RADAR_MAJORS` (default `BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,XAUUSDT`) is always scanned, even outside the top 150, and listed in the board's `majors` in that order whatever it scores. Each entry carries `side` (`bullish`, `bearish`, or `none` when choppy or balanced, with no tags or zone) and `extended`. A major still appears on the Bullish or Bearish list when it ranks there.
+
+Gold is XAUUSDT, which Binance lists as a `TRADIFI_PERPETUAL`. TradFi contracts (stocks, commodities) are kept out of the ranked universe; a major is the only way one gets in. XAUUSDT was checked on 2026-10-30 to trade 24/7 (continuous 4h klines through a weekend), so it scores like any perp. A major Binance doesn't list as a tradable USDT perp is logged and skipped.
+
 **Extended symbols.** A listed symbol is extended when its 4h move in the side's favour is at least 3 ATR and it has no live order block or FVG within 2 ATR of price. These are strong moves with nothing to enter at right now. They go in a separate `extended` list (up to 10 per side), so the main board holds setups a trader can act on. Their score is unchanged, and the tilt still counts them.
 
 **Live order blocks.** quant-core marks a block `mitigated` at its first touch. The radar treats a block as live if price has not come back to it yet, or if the first retest was within the last 3 closed bars and no close has gone through the far edge.
@@ -40,10 +44,12 @@ Each symbol gets a 0-100 score for each side. It is listed on whichever side sco
                  "tags": ["1h uptrend", "15m BOS up", "OI +6% 4h"] } ],
   "bearish": [],
   "extended": { "bullish": [ { "symbol": "ALPINEUSDT.P", "score": 55, "...": "same row shape" } ],
-                "bearish": [] } }
+                "bearish": [] },
+  "majors": [ { "symbol": "BTCUSDT.P", "score": 0, "side": "none", "extended": false, "tags": [], "zone": null, "...": "same row shape" },
+              { "symbol": "XAUUSDT.P", "score": 59, "side": "bearish", "extended": false, "...": "same row shape" } ] }
 ```
 
-`extended` was added to v1 without a version bump: a client that doesn't know the field ignores it.
+`extended` and `majors` were added to v1 without a version bump: a client that doesn't know a field ignores it.
 
 - `status` is `warming_up`, with empty lists, until the first full pass finishes (about 25 s after start).
 - `zone` is `null` when there is no live zone. `zone.kind` is `order_block` or `fvg`. `distance_pct` is negative below price and positive above it.
